@@ -2,17 +2,19 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/ioutil"
 	"os"
-	"path/filepath"
-	"sync"
-	"strings"
 	"path"
+	"path/filepath"
+	"strings"
+	"sync"
 )
 
 type Translation struct {
-	Template   string
+	Key      string `json:"id"`
+	Template string `json:"template"`
 }
 
 type Language map[string]Translation
@@ -21,12 +23,15 @@ type Translator struct {
 	directory    string
 	languagesRaw map[string][]byte
 	languages    map[string]Language
-	mutexRaw        sync.Mutex
-	mutexLang        sync.Mutex
+	mutexRaw     sync.Mutex
+	mutexLang    sync.Mutex
 }
 
-func NewTranslator(directory string) (*Translator, error) {
+var (
+	ErrLanguageNotFound = errors.New("Language is not loaded")
+)
 
+func NewTranslator(directory string) (*Translator, error) {
 	// check if directory exists
 	info, err := os.Stat(directory)
 	if err != nil {
@@ -71,7 +76,6 @@ func (t *Translator) Load() error {
 				return err
 			}
 			name := strings.Replace(info.Name(), ".json", "", -1)
-			fmt.Println(name)
 			// add language
 			err = t.parseLanguage(name, b)
 			if err != nil {
@@ -105,7 +109,83 @@ func (t *Translator) Set(key, value, lang string) error {
 		t.mutexLang.Unlock()
 		return nil
 	}
-	return fmt.Errorf("Language %s is not loaded", lang)
+	return ErrLanguageNotFound
+}
+
+func (t *Translator) GetAll(key string) map[string]string {
+	values := make(map[string]string)
+	for langCode, language := range t.languages {
+		if translation, ok := language[key]; ok {
+			values[langCode] = translation.Template
+		}
+	}
+	return values
+}
+
+func (t *Translator) Remove(key, lang string) error {
+	if translations, ok := t.languages[lang]; ok {
+		// update key
+		t.mutexLang.Lock()
+		delete(translations, key)
+		t.mutexLang.Unlock()
+		return nil
+	}
+	return ErrLanguageNotFound
+}
+
+func (t *Translator) Languages() ([]map[string]interface{}, error) {
+	plain := make([]map[string]interface{}, 0, len(t.languages))
+	for langCode := range t.languages {
+		language, err := t.Language(langCode)
+		if err != nil {
+			return nil, err
+		}
+		plain = append(plain, map[string]interface{}{
+			"id":           langCode,
+			"translations": language,
+		})
+	}
+	return plain, nil
+}
+
+func (t *Translator) Language(lang string) (map[string]interface{}, error) {
+	if translations, ok := t.languages[lang]; ok {
+		plain := make([]Translation, 0, len(translations))
+		for _, value := range translations {
+			plain = append(plain, value)
+		}
+		return map[string]interface{}{
+			"id":           lang,
+			"translations": plain,
+		}, nil
+	}
+	return nil, ErrLanguageNotFound
+}
+
+func (t *Translator) AddLanguage(lang, base string) (map[string]interface{}, error) {
+	if translations, ok := t.languages[base]; ok {
+		t.mutexLang.Lock()
+		t.languages[lang] = translations
+		t.mutexLang.Unlock()
+		return t.Language(lang)
+	}
+	return nil, ErrLanguageNotFound
+}
+
+func (t *Translator) RemoveLanguage(lang string) error {
+	if _, ok := t.languages[lang]; ok {
+		// delete opt translation
+		t.mutexLang.Lock()
+		delete(t.languages, lang)
+		t.mutexLang.Unlock()
+		// delete raw
+		t.mutexRaw.Lock()
+		delete(t.languagesRaw, lang)
+		t.mutexRaw.Unlock()
+		// delete file
+		return os.Remove(path.Join(t.directory, lang+".json"))
+	}
+	return ErrLanguageNotFound
 }
 
 // Sync
@@ -113,7 +193,7 @@ func (t *Translator) Sync(base string, orphanRemoval bool) error {
 
 	baseLanguage, ok := t.languages[base]
 	if !ok {
-		return fmt.Errorf("Language %s is not loaded", base)
+		return ErrLanguageNotFound
 	}
 	// iterate over all languages and remove key
 	if orphanRemoval {
@@ -153,7 +233,7 @@ func (t *Translator) Save(indent bool) error {
 			return err
 		}
 		// save to file
-		f, err := os.Create(path.Join(t.directory, lang + ".json"))
+		f, err := os.Create(path.Join(t.directory, lang+".json"))
 		if err != nil {
 			return err
 		}
@@ -196,7 +276,7 @@ func (t *Translator) extractKeys(prefix string, m map[string]interface{}) map[st
 		key := prefix + k
 		switch v.(type) {
 		case string:
-			keys[key] = Translation{Template: v.(string)}
+			keys[key] = Translation{Template: v.(string), Key: key}
 		case map[string]interface{}:
 			sub := t.extractKeys(key, v.(map[string]interface{}))
 			// merge
@@ -229,7 +309,7 @@ func (t *Translator) syncRaw(lang string, indent bool) (err error) {
 		t.mutexRaw.Unlock()
 		return nil
 	}
-	return fmt.Errorf("Language %s is not loaded", lang)
+	return ErrLanguageNotFound
 }
 
 func insert(key, value string, target map[string]interface{}) {

@@ -30,4 +30,4 @@ test-data
 
 vendor/**
 !vendor/manifest
-
+gin-bin
